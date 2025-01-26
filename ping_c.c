@@ -51,7 +51,7 @@ unsigned short checksum(void *b, int len){
 }
 
 
-int main(){
+int main(int argc, char *argv[]){
 	int raw_socket = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
 	if (raw_socket < 0){
 		printf("Raw socket unable to be created");
