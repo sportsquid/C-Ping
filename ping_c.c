@@ -11,8 +11,13 @@
 #include <netinet/ip_icmp.h>
 #include <time.h>
 #include <fcntl.h>
-#include <signal.h>
+#include <errno.h>
 
+
+
+#define PING_TIMEOUT 2
+
+//64 bits, 8 bytes
 struct icmp_packet{
 	uint8_t type;
 	uint8_t code;
@@ -21,6 +26,7 @@ struct icmp_packet{
 	uint16_t sequence;
 };
 
+//20 bytes, 160 bits
 struct ip_packet {
 	uint8_t ihl:4;
 	uint8_t version:4;
@@ -34,6 +40,8 @@ struct ip_packet {
 	uint32_t source_ip;
 	uint32_t destination_ip;
 };
+
+
 
 unsigned short checksum(void *b, int len){
 	unsigned short *buf = b;
@@ -66,12 +74,20 @@ int main(int argc, char *argv[]){
 
     //set up ping destination ip
 
-   	struct sockaddr_in dest_addr;
+   	struct sockaddr_in dest_addr, source_addr;
 	memset(&dest_addr, 0, sizeof(dest_addr));
 	dest_addr.sin_family = AF_INET;
 	inet_pton(AF_INET, argv[1], &dest_addr.sin_addr);
+
+	memset(&source_addr, 0, sizeof(source_addr));
+	source_addr.sin_family = AF_INET;
+	//TODO make this dynamic
+	inet_pton(AF_INET, "192.168.50.215", &source_addr.sin_addr);
+	 socklen_t addr_len = sizeof(source_addr);
+
 	uint32_t source_ip = get_local_ip();
 	uint32_t destination_ip = inet_addr(argv[1]);
+
 
     //create raw socket
 	int raw_socket = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
@@ -81,13 +97,22 @@ int main(int argc, char *argv[]){
 		} else {
 			printf("Raw socket created on file descriptor %d\n", raw_socket);
 	}
+	//create ICMP socket to listen.
+	int icmp_listen_socket = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+	if (icmp_listen_socket < 0){
+		printf("ICMP socket unable to be created");
+		return 0;
+		} else {
+			printf("ICMP socket created on file descriptor %d\n", icmp_listen_socket);
+	}
+
 	//construct ICMP packet
 	struct icmp_packet icmp_header;
 	memset(&icmp_header, 0, sizeof(icmp_header));
 	icmp_header.type = 8;
 	icmp_header.code = 0;
-	icmp_header.identifier = 25565;
-	icmp_header.sequence = 1;
+	icmp_header.identifier = htons(getpid());
+	icmp_header.sequence = htons(1);
 	icmp_header.checksum = checksum(&icmp_header, sizeof(icmp_header));
 
 	//construct IP packet
@@ -114,6 +139,9 @@ int main(int argc, char *argv[]){
 	memcpy(packet, &ip_header, sizeof(struct ip_packet));
 	memcpy(packet+sizeof(struct ip_packet), &icmp_header, sizeof(struct icmp_packet));
 
+
+
+	//send packet
 	if(sendto(raw_socket, packet, sizeof(struct ip_packet) + sizeof(struct icmp_packet), 0,
 	(struct sockaddr *) &dest_addr, sizeof(dest_addr)) < 0) {
 		printf("packet failed to send\n");
@@ -121,11 +149,54 @@ int main(int argc, char *argv[]){
 	}
 	printf("packet sent\n");
 
-	struct timeval timeout;
+	//read packet from socket
+    //Set a timeout for the socket
+    struct timeval timeout;
+    timeout.tv_sec = PING_TIMEOUT;
+    timeout.tv_usec = 0;
+
+    if (setsockopt(icmp_listen_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+        perror("Failed to set socket timeout");
+        close(icmp_listen_socket);
+        return 1;
+    }
+
+    printf("Listening for ICMP responses with a %d-second timeout...\n", PING_TIMEOUT);
+
+    // Wait for an ICMP response
+    char buffer[1024];
+    int bytes_received = recvfrom(icmp_listen_socket, buffer, sizeof(buffer), 0, (struct sockaddr *)&source_addr, &addr_len);
+    if (bytes_received < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            printf("Timeout: No ICMP response received\n");
+        } else {
+            perror("recvfrom failed");
+        }
+        close(icmp_listen_socket);
+        return 1;
+    }
+
+    printf("Received %d bytes from %s\n", bytes_received, inet_ntoa(source_addr.sin_addr));
+
+    // Parse the response
+    struct ip_packet *ip_header_response = (struct ip_packet *)buffer;
+    struct icmp_packet *icmp_response = (struct icmp_packet *)(buffer + (ip_header_response->ihl << 2));
+
+    // Check if the response is an ICMP Echo Reply
+        if (icmp_response->type == 0) {
+            printf("Received response from %s\n", argv[1]);
+        } else {
+            printf("Received non-echo response of type: %d\n", icmp_response->type);
+        }
+
+
 
 
 	shutdown(raw_socket, SHUT_RDWR);
 	close(raw_socket);
+
+	shutdown(icmp_listen_socket, SHUT_RDWR);
+	close(icmp_listen_socket);
 
 
 	return 0;
